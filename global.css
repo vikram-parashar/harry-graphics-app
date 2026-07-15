@@ -1,0 +1,40 @@
+/**
+ * Global stylesheet. NativeWind reads @theme to expose the design tokens
+ * to the Tailwind compiler, so `bg-cream`, `border-charcoal`, etc. work.
+ *
+ * Visual rule (from harry-graphics-site design reference):
+ *   - Flat. No rounded corners, no shadows, no gradients.
+ *   - Sections separated by 1–2px borders.
+ *   - Headings = serif display.
+ *   - Eyebrow/label = mono uppercase tracking-widest.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@theme {
+  --color-cream: #F5F1E8;
+  --color-cream-dark: #EDE7D9;
+  --color-charcoal: #1A1A1A;
+  --color-charcoal-light: #6B6B6B;
+  --color-charcoal-soft: #2D2D2D;
+  --color-cyan: #00AEEF;
+  --color-highlight: #FF6B35;
+  --color-magenta: #D32F2F;
+  --color-yellow: #FBC02D;
+  --color-black-rich: #0A0A0A;
+}
+
+/* App-wide resets — flat by default. */
+* {
+  box-shadow: none !important;
+  elevation: 0;
+}
+
+/* Default body */
+html,
+body,
+#root {
+  background-color: #F5F1E8;
+  color: #1A1A1A;
+}
