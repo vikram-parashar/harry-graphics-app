@@ -21,13 +21,13 @@ export default function AuthScreen() {
 
   useEffect(() => {
     let mounted = true
-    ;(async () => {
-      const { data } = await supabase.auth.getSession()
-      if (!mounted) return
-      setSession(data.session)
-      setChecking(false)
-      if (data.session) router.replace('/projects')
-    })()
+      ; (async () => {
+        const { data } = await supabase.auth.getSession()
+        if (!mounted) return
+        setSession(data.session)
+        setChecking(false)
+        if (data.session) router.replace('/projects')
+      })()
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
       setSession(s)
       if (s) {
@@ -54,7 +54,7 @@ export default function AuthScreen() {
       {/* Body — wordmark + tagline + CTA */}
       <View className="flex-1 items-center justify-center px-8">
         <Text className="text-5xl font-bold text-charcoal">Harry Graphics</Text>
-        <Text className="mt-2 font-mono text-xs uppercase tracking-widest text-charcoal-light">
+        <Text className="mt-2 font-mono text-center text-xs uppercase tracking-widest text-charcoal-light">
           Your Primary Source for ID Cards & Printing Needs
         </Text>
 
@@ -68,7 +68,7 @@ export default function AuthScreen() {
           onPress={() => setModalOpen(true)}
           className="mt-8 h-14 w-full max-w-sm items-center justify-center border-2 border-charcoal bg-charcoal active:bg-charcoal-soft"
         >
-          <Text className="font-mono text-sm uppercase tracking-widest text-cream">
+          <Text className="font-mono text-sm uppercase tracking-widest text-cream w-60 text-center">
             Get Started
           </Text>
         </TouchableOpacity>

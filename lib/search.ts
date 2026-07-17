@@ -1,26 +1,25 @@
 import Fuse from 'fuse.js'
-import type { DataSheet } from './storage'
+import type { DataSheet, SortColumn, ColumnFilter } from './storage'
 
-/**
- * Build a Fuse index over a single column of the sheet.
- *
- * Returns a function that, given a query, returns up to `limit` matches.
- * Each match carries the original row index (into the *unsorted* rows
- * array) so the caller can map it back to a referenced row.
- */
 export function buildFuzzySearcher(
   sheet: DataSheet,
-  column: string,
+  columns: string[],
   limit = 5
-): (query: string) => { value: string; rowIndex: number }[] {
-  const items = sheet.rows.map((r, i) => ({
-    rowIndex: i,
-    value: String(r[column] ?? ''),
-  }))
+): (query: string) => { value: string; column: string; rowIndex: number }[] {
+  const items: { rowIndex: number; [key: string]: string | number }[] = []
+  for (let i = 0; i < sheet.rows.length; i++) {
+    const entry: { rowIndex: number; [key: string]: string | number } = {
+      rowIndex: i,
+    }
+    for (const col of columns) {
+      entry[col] = String(sheet.rows[i][col] ?? '')
+    }
+    items.push(entry)
+  }
   const fuse = new Fuse(items, {
-    keys: ['value'],
+    keys: columns,
     includeScore: false,
-    threshold: 0.4, // 0 = exact, 1 = anything
+    threshold: 0.4,
     ignoreLocation: true,
     minMatchCharLength: 1,
   })
@@ -28,24 +27,91 @@ export function buildFuzzySearcher(
     if (!query.trim()) return []
     return fuse
       .search(query, { limit })
-      .map(r => ({ value: r.item.value, rowIndex: r.item.rowIndex }))
+      .map(r => {
+        const item = r.item
+        let matchedCol = columns[0]
+        let matchedVal = ''
+        for (const col of columns) {
+          const val = String(item[col] ?? '')
+          if (val.toLowerCase().includes(query.toLowerCase())) {
+            matchedCol = col
+            matchedVal = val
+            break
+          }
+        }
+        if (!matchedVal) {
+          matchedCol = columns[0]
+          matchedVal = String(item[columns[0]] ?? '')
+        }
+        return {
+          value: matchedVal,
+          column: matchedCol,
+          rowIndex: item.rowIndex as number,
+        }
+      })
   }
 }
 
 /**
- * Sort the sheet's rows by a column (string comparison) and return a
- * list of original row indices in sorted order. The capture screen uses
- * this to navigate Prev/Next through the sorted view.
+ * Returns row indices after applying filters AND sorting.
+ *
+ * @param sheet      The data sheet
+ * @param sortCols   Multi-column sort specification
+ * @param filters    Active column filters
+ * @param imageNames Set of photo_id values that have images on disk
+ * @param photoIdCol Name of the photo_id column (for hasImageOnly filter)
+ */
+export function filteredSortedRowIndices(
+  sheet: DataSheet,
+  sortCols: SortColumn[],
+  filters: ColumnFilter[],
+  imageNames?: Set<string>,
+  photoIdCol?: string,
+): number[] {
+  let indices = sheet.rows.map((_, idx) => idx)
+
+  // Apply filters
+  for (const filter of filters) {
+    if (filter.excludedValues.length === 0 && !filter.hasImageOnly) continue
+
+    indices = indices.filter(idx => {
+      const value = String(sheet.rows[idx][filter.column] ?? '')
+
+      // Exclude values that are unchecked
+      if (filter.excludedValues.includes(value)) return false
+
+      // For photo_id column: only keep rows that have images
+      if (filter.hasImageOnly && filter.column === photoIdCol) {
+        if (!imageNames || !imageNames.has(value)) return false
+      }
+
+      return true
+    })
+  }
+
+  // Sort the filtered indices
+  if (sortCols.length === 0) return indices
+
+  return indices
+    .map(idx => ({ idx, row: sheet.rows[idx] }))
+    .sort((a, b) => {
+      for (const sc of sortCols) {
+        const va = String(a.row[sc.column] ?? '')
+        const vb = String(b.row[sc.column] ?? '')
+        const cmp = va.localeCompare(vb, undefined, { numeric: true })
+        if (cmp !== 0) return sc.direction === 'desc' ? -cmp : cmp
+      }
+      return 0
+    })
+    .map(x => x.idx)
+}
+
+/**
+ * Backwards-compatible wrapper that just sorts (no filters).
  */
 export function sortedRowIndices(
   sheet: DataSheet,
-  sortBy: string
+  sortCols: SortColumn[]
 ): number[] {
-  return sheet.rows
-    .map((row, idx) => ({
-      idx,
-      key: String(row[sortBy] ?? ''),
-    }))
-    .sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))
-    .map(x => x.idx)
+  return filteredSortedRowIndices(sheet, sortCols, [])
 }

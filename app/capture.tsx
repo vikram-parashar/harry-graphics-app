@@ -11,10 +11,9 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native'
-import { router, useLocalSearchParams } from 'expo-router'
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router'
 import { CameraView, useCameraPermissions } from 'expo-camera'
-import * as FileSystem from 'expo-file-system/legacy'
-import { ArrowLeft, MoreVertical, Search, Check, X, RotateCcw, Camera as CameraIcon, Plus, Settings as SettingsIcon } from 'lucide-react-native'
+import { ArrowLeft, MoreVertical, Search, Check, X, RotateCcw, Camera as CameraIcon, Plus, Settings as SettingsIcon, Filter as FilterIcon, Image as ImageIcon } from 'lucide-react-native'
 import Fuse from 'fuse.js'
 import {
   getDataSheet,
@@ -27,45 +26,12 @@ import {
   type ProjectSettings,
 } from '@/lib/storage'
 import { appendRowWithPhotoId } from '@/lib/dataSheet'
-import { sortedRowIndices } from '@/lib/search'
+import { filteredSortedRowIndices } from '@/lib/search'
 import { hash4 } from '@/lib/nanoid'
 import { touchProject } from '@/lib/db'
 
 const SCREEN_W = Dimensions.get('window').width
 
-/**
- * Screen 4 — Capture.
- *
- * Layout:
- *   ┌─────────────────────────────────┐
- *   │ [search bar]  ........ [⋮ menu] │ ← top
- *   │  top-5 fuzzy match dropdown     │
- *   ├─────────────────────────────────┤
- *   │                                 │
- *   │                                 │
- *   │            CAMERA               │  ← 80vh
- *   │      [ orange 2px rectangle ]   │
- *   │                                 │
- *   │            (○)                  │  ← shutter
- *   ├─────────────────────────────────┤
- *   │  ← prev   {first-row value}     │  ← bottom
- *   │            {search_in value}    │
- *   │           next →                │
- *   └─────────────────────────────────┘
- *
- * Behaviors:
- *   - Shutter → takePictureAsync → preview replaces camera
- *   - Preview → Retake (discard) | Save (filename = photo_id value)
- *   - Save → if name collides, prompt for custom name; placeholder =
- *     `{search_in value}+{4-char hash}`
- *   - Search bar: fuzzy top-5 matches against `search_in` column;
- *     onSelect sets referenced_row_number.
- *   - 3-dot menu: Settings (→ Screen 3), Add new entry (prompt for unique
- *     name → append row → shoot → save with that name → restore prior
- *     referenced_row_number).
- *   - Bottom: shows first-row value + search_in value of referenced row;
- *     Prev/Next moves referenced_row_number through the *sorted* table.
- */
 export default function CaptureScreen() {
   const { project_id, project_name } = useLocalSearchParams<{
     project_id: string
@@ -75,7 +41,7 @@ export default function CaptureScreen() {
   const [sheet, setSheetState] = useState<DataSheet | null>(null)
   const [settings, setSettingsState] = useState<ProjectSettings | null>(null)
   const [loading, setLoading] = useState(true)
-  const [refRowIdx, setRefRowIdx] = useState(0) // index into sorted order
+  const [refRowIdx, setRefRowIdx] = useState(0)
   const [existingNames, setExistingNames] = useState<Set<string>>(new Set())
 
   // Camera state
@@ -118,25 +84,50 @@ export default function CaptureScreen() {
     reload()
   }, [reload])
 
+  // Reload when returning from filter/settings screen
+  useFocusEffect(
+    useCallback(() => {
+      // Refresh settings to pick up filter changes when returning to this screen
+      const refreshSettings = async () => {
+        const st = await getSettings(project_id)
+        if (st) setSettingsState(st)
+        const names = await listImageNames(project_id)
+        setExistingNames(new Set(names))
+      }
+      refreshSettings()
+    }, [project_id])
+  )
+
   // Request camera permission on mount
   useEffect(() => {
     if (!perm?.granted) requestPerm()
   }, [perm, requestPerm])
 
-  // ─── Derived: sorted rows + fuse searcher ──────────────────────────
+  // ─── Derived: filtered + sorted rows + fuse searcher ──────────────
   const sortedIdx = useMemo(() => {
     if (!sheet || !settings) return []
-    return sortedRowIndices(sheet, settings.sort_by)
-  }, [sheet, settings])
+    return filteredSortedRowIndices(
+      sheet,
+      settings.sort_by,
+      settings.filters ?? [],
+      existingNames,
+      settings.photo_id_column,
+    )
+  }, [sheet, settings, existingNames])
 
   const fuse = useMemo(() => {
     if (!sheet || !settings) return null
-    const items = sheet.rows.map((r, i) => ({
-      rowIndex: i,
-      value: String(r[settings.search_in] ?? ''),
-    }))
+    const items = sheet.rows.map((r, i) => {
+      const entry: { rowIndex: number;[key: string]: string | number } = {
+        rowIndex: i,
+      }
+      for (const col of settings.search_in) {
+        entry[col] = String(r[col] ?? '')
+      }
+      return entry
+    })
     return new Fuse(items, {
-      keys: ['value'],
+      keys: settings.search_in,
       includeScore: false,
       threshold: 0.4,
       ignoreLocation: true,
@@ -147,8 +138,7 @@ export default function CaptureScreen() {
   const matches = useMemo(() => {
     if (!fuse || !query.trim()) return []
     return fuse.search(query, { limit: 5 }).map(r => ({
-      value: r.item.value,
-      rowIndex: r.item.rowIndex,
+      rowIndex: r.item.rowIndex as number,
     }))
   }, [fuse, query])
 
@@ -161,7 +151,6 @@ export default function CaptureScreen() {
       origIdx,
       row: sheet.rows[origIdx],
       firstColValue: String(sheet.rows[origIdx]?.[sheet.columns[0] ?? ''] ?? ''),
-      searchInValue: String(sheet.rows[origIdx]?.[settings.search_in] ?? ''),
       photoIdValue: String(sheet.rows[origIdx]?.[settings.photo_id_column] ?? ''),
     }
   }, [sheet, settings, sortedIdx, refRowIdx])
@@ -173,7 +162,7 @@ export default function CaptureScreen() {
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.7,
-        base64: true,
+        base64: false, // Don't need base64 — we store files directly
         skipProcessing: false,
       })
       if (!photo?.uri) {
@@ -181,7 +170,6 @@ export default function CaptureScreen() {
         return
       }
       setPreviewUri(photo.uri)
-      // Stash the photo for the save flow.
       setPendingPhotoUri(photo.uri)
     } catch (e) {
       Alert.alert('Camera error', e instanceof Error ? e.message : 'Unknown error')
@@ -195,14 +183,6 @@ export default function CaptureScreen() {
     setPendingPhotoUri(null)
   }, [])
 
-  /**
-   * Save flow:
-   *   1. Compute target filename = current row's photo_id value.
-   *   2. If that name already has a saved image → open collision modal
-   *      with placeholder = `{search_in_value}+{hash4()}`.
-   *   3. Once a unique name is resolved, read the photo as base64 JPEG
-   *      and write it to AsyncStorage under `image:{pid}:{name}`.
-   */
   const beginSave = useCallback(
     async (opts: { isNewEntry?: boolean; fixedName?: string } = {}) => {
       if (!pendingPhotoUri || !settings || !sheet) return
@@ -212,8 +192,11 @@ export default function CaptureScreen() {
         return
       }
       if (existingNames.has(targetName) && !opts.fixedName) {
-        // Collision → prompt for custom name
-        const placeholder = `${refRow?.searchInValue ?? 'photo'}_${hash4()}`
+        const searchInVals = settings.search_in
+          .map(col => String(refRow?.row?.[col] ?? ''))
+          .filter(v => v)
+          .join('_')
+        const placeholder = `${searchInVals || 'photo'}_${hash4()}`
         setCollisionDefault(placeholder)
         setCollisionValue(placeholder)
         setCollisionOpen(true)
@@ -229,28 +212,20 @@ export default function CaptureScreen() {
     async (name: string, isNewEntry: boolean) => {
       if (!pendingPhotoUri) return
       try {
-        // Read photo as base64.
-        const b64 = await FileSystem.readAsStringAsync(pendingPhotoUri, {
-          encoding: FileSystem.EncodingType.Base64,
-        })
-        const dataUrl = `data:image/jpeg;base64,${b64}`
-        await setImage(project_id, name, dataUrl)
+        // Copy the photo file directly to our storage (no base64 conversion)
+        await setImage(project_id, name, pendingPhotoUri)
         setExistingNames(prev => new Set(prev).add(name))
 
-        // Persist updated referenced_row_number.
         if (settings) {
           await setSettings(project_id, { ...settings, referenced_row_number: refRowIdx })
         }
         await touchProject(project_id)
 
-        // Clean up preview state.
         setPreviewUri(null)
         setPendingPhotoUri(null)
         setCollisionOpen(false)
 
         if (isNewEntry) {
-          // New-entry flow: the caller (add-entry modal) already saved
-          // referenced_row_number in its closure and will restore it.
           setAddEntryOpen(false)
           await reload()
         }
@@ -290,33 +265,29 @@ export default function CaptureScreen() {
         Alert.alert('Name already used', 'Pick a unique photo_id value.')
         return
       }
-      // Append a row to the data sheet with this photo_id value.
       const { sheet: nextSheet } = appendRowWithPhotoId(sheet, newName)
       const prevRefRow = refRowIdx
       await setDataSheet(project_id, nextSheet)
       setSheetState(nextSheet)
-      // Point the capture screen at the new row (last in the sorted view
-      // — its sort key is whatever value the user typed in).
-      // For simplicity, sort it like other rows; the new row will appear
-      // at its sorted position. We re-find it via the photo_id value.
-      const newSortedIdx = sortedRowIndices(nextSheet, settings.sort_by)
+      const newSortedIdx = filteredSortedRowIndices(
+        nextSheet,
+        settings.sort_by,
+        settings.filters ?? [],
+        existingNames,
+        settings.photo_id_column,
+      )
       const newOrigIdx = nextSheet.rows.findIndex(
         r => String(r[settings.photo_id_column] ?? '') === newName
       )
       const newSortedPos = newSortedIdx.indexOf(newOrigIdx)
       setRefRowIdx(newSortedPos >= 0 ? newSortedPos : newSortedIdx.length - 1)
 
-      // Open camera for this new entry; remember to restore refRowIdx
-      // after the shot is saved.
       setAddEntryOpen(false)
-        // Stash the "previous" ref so finalizeSave's isNewEntry branch
-        // can restore it after the photo is taken and saved.
         ; (handleAddNewEntry as any)._prevRefRow = prevRefRow
     },
     [sheet, settings, project_id, existingNames, refRowIdx]
   )
 
-  // After saving a new-entry photo, restore the original referenced row.
   useEffect(() => {
     if (!previewUri && !addEntryOpen) {
       const prev = (handleAddNewEntry as any)._prevRefRow
@@ -336,6 +307,21 @@ export default function CaptureScreen() {
     )
   }
 
+  // Build the search_in comma-separated display
+  const searchInDisplay = settings.search_in
+    .map(col => `${col}: ${String(refRow?.row?.[col] ?? '')}`)
+    .join(', ')
+
+  // Build placeholder for search bar
+  const searchPlaceholder = settings.search_in.length > 0
+    ? `Search in ${settings.search_in.join(', ')}…`
+    : 'Search…'
+
+  // Active filter count
+  const activeFilterCount = (settings.filters ?? []).filter(
+    f => f.excludedValues.length > 0 || f.hasImageOnly
+  ).length
+
   return (
     <View className="flex-1 bg-charcoal">
       {/* ── TOP — search bar + 3-dot menu ──────────────────────────── */}
@@ -351,7 +337,7 @@ export default function CaptureScreen() {
                   setMatchesOpen(true)
                 }}
                 onFocus={() => setMatchesOpen(true)}
-                placeholder={`Search in "${settings.search_in}"…`}
+                placeholder={searchPlaceholder}
                 placeholderTextColor="#6B6B6B"
                 className="h-12 flex-1 text-charcoal"
               />
@@ -370,26 +356,35 @@ export default function CaptureScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Fuzzy top-5 matches */}
+        {/* Fuzzy top-5 matches — show all search_in columns in flex-col */}
         {matchesOpen && matches.length > 0 ? (
           <View className="mt-2 border border-charcoal/20 bg-white">
-            {matches.map(m => (
-              <TouchableOpacity
-                key={m.rowIndex}
-                onPress={() => handleMatchSelect(m.rowIndex)}
-                className="flex-row items-center justify-between border-b border-charcoal/10 px-3 py-2 active:bg-cream-dark"
-              >
-                <Text className="text-sm text-charcoal">{m.value}</Text>
-                <Text className="font-mono text-[10px] uppercase tracking-widest text-charcoal-light">
-                  Row {m.rowIndex + 1}
-                </Text>
-              </TouchableOpacity>
-            ))}
+            {matches.map(m => {
+              const row = sheet.rows[m.rowIndex]
+              return (
+                <TouchableOpacity
+                  key={m.rowIndex}
+                  onPress={() => handleMatchSelect(m.rowIndex)}
+                  className="border-b border-charcoal/10 px-3 py-2 active:bg-cream-dark"
+                >
+                  <View className="flex-col gap-0.5">
+                    {settings.search_in.map(col => (
+                      <Text key={col} className="text-xs text-charcoal">
+                        {col}: {String(row[col] ?? '')}
+                      </Text>
+                    ))}
+                  </View>
+                  <Text className="mt-1 font-mono text-[10px] uppercase tracking-widest text-charcoal-light">
+                    Row {m.rowIndex + 1}
+                  </Text>
+                </TouchableOpacity>
+              )
+            })}
           </View>
         ) : null}
       </View>
 
-      {/* ── MIDDLE — camera / preview (80vh) ───────────────────────── */}
+      {/* ── MIDDLE — camera / preview ──────────────────────────────── */}
       <View style={{ height: SCREEN_W * 1.6 }} className="bg-black">
         {previewUri ? (
           <PreviewView
@@ -412,7 +407,7 @@ export default function CaptureScreen() {
       </View>
 
       {/* ── BOTTOM — referenced row + prev/next ───────────────────── */}
-      <View className="flex-1 border-t border-charcoal-light/30 bg-cream px-4 py-3">
+      <View className="flex-1 border-t border-charcoal-light/30 bg-cream py-3">
         {refRow ? (
           <View className="flex-1">
             <View className="flex-row items-center justify-between">
@@ -428,13 +423,13 @@ export default function CaptureScreen() {
               </TouchableOpacity>
               <View className="flex-1 items-center px-4">
                 <Text className="font-mono text-[10px] uppercase tracking-widest text-charcoal-light">
-                  {sheet.columns[0]} (row {refRow.origIdx + 1}/{sheet.rows.length})
+                  {sheet.columns[0]} (row {refRow.origIdx + 1}/{sheet.rows.length}){sortedIdx.length !== sheet.rows.length ? ` · ${sortedIdx.length} shown` : ''}
                 </Text>
                 <Text className="mt-0.5 text-base font-semibold text-charcoal" numberOfLines={1}>
                   {refRow.firstColValue || '—'}
                 </Text>
-                <Text className="mt-0.5 text-xs text-charcoal-light" numberOfLines={1}>
-                  {settings.search_in}: {refRow.searchInValue || '—'}
+                <Text className="mt-0.5 text-xs text-charcoal-light" numberOfLines={10}>
+                  {searchInDisplay || '—'}
                 </Text>
               </View>
               <TouchableOpacity
@@ -468,7 +463,7 @@ export default function CaptureScreen() {
         ) : (
           <View className="flex-1 items-center justify-center">
             <Text className="font-mono text-xs uppercase tracking-widest text-charcoal-light">
-              No rows in sheet — add an entry from the menu.
+              No rows match current filters — adjust filters from the menu.
             </Text>
           </View>
         )}
@@ -489,6 +484,30 @@ export default function CaptureScreen() {
                 setMenuOpen(false)
                 router.push({
                   pathname: '/settings',
+                  params: { project_id, project_name },
+                })
+              }}
+            />
+            <View className="h-px bg-charcoal/10" />
+            <MenuItem
+              icon={<FilterIcon size={16} color={activeFilterCount > 0 ? '#D32F2F' : '#1A1A1A'} />}
+              label={`Filter${activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}`}
+              onPress={() => {
+                setMenuOpen(false)
+                router.push({
+                  pathname: '/filter',
+                  params: { project_id, project_name },
+                })
+              }}
+            />
+            <View className="h-px bg-charcoal/10" />
+            <MenuItem
+              icon={<ImageIcon size={16} color="#1A1A1A" />}
+              label="View Photos"
+              onPress={() => {
+                setMenuOpen(false)
+                router.push({
+                  pathname: '/photo_gallery',
                   params: { project_id, project_name },
                 })
               }}
@@ -524,7 +543,6 @@ export default function CaptureScreen() {
         existingNames={existingNames}
         onClose={() => {
           setCollisionOpen(false)
-          // Discard the photo if user cancels.
           setPreviewUri(null)
           setPendingPhotoUri(null)
         }}
@@ -536,15 +554,7 @@ export default function CaptureScreen() {
 
 // ─── Sub-components ──────────────────────────────────────────────────
 
-/**
- * Camera overlay — 2px solid orange rectangle, no fill, centred on
- * the camera view. Sized roughly to the photo aspect ratio (W:H in mm).
- *
- * Implementation note: position absolute, centred with flexbox.
- */
 function Overlay({ photoWidthMm, photoHeightMm }: { photoWidthMm: number; photoHeightMm: number }) {
-  // Make the box 70% of camera width, but cap by height; keep aspect
-  // ratio of photoWidthMm:photoHeightMm.
   const aspect = photoHeightMm / photoWidthMm
   const w = SCREEN_W * 0.7
   const h = w * aspect
@@ -587,7 +597,6 @@ function Overlay({ photoWidthMm, photoHeightMm }: { photoWidthMm: number; photoH
   )
 }
 
-/** Circular shutter button — bottom-centre of the camera view. */
 function ShutterButton({
   onPress,
   disabled,
@@ -632,7 +641,6 @@ function ShutterButton({
   )
 }
 
-/** Preview screen — replaces the camera view after a shot. */
 function PreviewView({
   uri,
   onRetake,
@@ -647,8 +655,6 @@ function PreviewView({
   return (
     <View style={{ flex: 1, backgroundColor: '#000' }}>
       <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
-        {/* We use a plain View + Image pattern. expo-camera's takePictureAsync
-            returns a file URI; we render it with the Image component. */}
         <FastImage uri={uri} />
       </View>
       <View
@@ -704,9 +710,7 @@ function PreviewView({
   )
 }
 
-/** Minimal image renderer — using react-native's Image (no FastImage dep). */
 function FastImage({ uri }: { uri: string }) {
-  // Use require/import inline so we don't fight the bundler.
   const { Image } = require('react-native')
   return (
     <Image

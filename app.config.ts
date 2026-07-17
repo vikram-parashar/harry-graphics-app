@@ -9,7 +9,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   slug: 'harry-graphics-app',
   version: '1.0.0',
   orientation: 'portrait',
-  icon: './assets/icon.png',
+  icon: './assets/logo.png',
   scheme: 'harrygraphics',
   userInterfaceStyle: 'light',
   ios: {
@@ -18,7 +18,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   },
   android: {
     adaptiveIcon: {
-      foregroundImage: './assets/adaptive-icon.png',
+      foregroundImage: './assets/logo.png',
       backgroundColor: '#F5F1E8',
     },
     package: 'com.harrygraphics.app',
@@ -26,7 +26,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   web: {
     bundler: 'metro',
     output: 'static',
-    favicon: './assets/favicon.png',
+    favicon: './assets/logo.svg'
   },
   plugins: ['expo-router', 'expo-secure-store'],
   experiments: {
@@ -36,7 +36,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     supabaseUrl: SUPABASE_URL,
     supabaseAnonKey: SUPABASE_KEY,
     eas: {
-      projectId: 'YOUR-EAS-PROJECT-ID',
+      "projectId": "53d3623d-cfc3-40e0-9a25-8541719e5d5e"
     },
   },
 })

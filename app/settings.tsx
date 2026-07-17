@@ -10,7 +10,7 @@ import {
   Platform,
 } from 'react-native'
 import { router, useLocalSearchParams } from 'expo-router'
-import { ArrowLeft, Check } from 'lucide-react-native'
+import { ArrowLeft, Check, X, ArrowUp, ArrowDown } from 'lucide-react-native'
 import {
   getDataSheet,
   getSettings,
@@ -18,6 +18,7 @@ import {
   DEFAULT_SETTINGS,
   type DataSheet,
   type ProjectSettings,
+  type SortColumn,
 } from '@/lib/storage'
 import { touchProject } from '@/lib/db'
 
@@ -46,8 +47,9 @@ export default function SettingsScreen() {
           setSettingsState(
             st ?? {
               photo_id_column: firstCol,
-              sort_by: firstCol,
-              search_in: firstCol,
+              sort_by: [{ column: firstCol, direction: 'asc' }],
+              search_in: [firstCol],
+              filters: [],
               ...DEFAULT_SETTINGS,
             }
           )
@@ -66,16 +68,23 @@ export default function SettingsScreen() {
     if (!settings || !sheet) return
     setSaving(true)
     try {
-      // Make sure photo_id column actually exists (in case user picked a
-      // deleted one — defensive).
+      // Validate photo_id_column
       if (!sheet.columns.includes(settings.photo_id_column)) {
         settings.photo_id_column = sheet.columns[0]
       }
-      if (!sheet.columns.includes(settings.sort_by)) {
-        settings.sort_by = sheet.columns[0]
+      // Validate sort_by columns
+      settings.sort_by = settings.sort_by.filter(
+        sc => sheet.columns.includes(sc.column)
+      )
+      if (settings.sort_by.length === 0) {
+        settings.sort_by = [{ column: sheet.columns[0], direction: 'asc' }]
       }
-      if (!sheet.columns.includes(settings.search_in)) {
-        settings.search_in = sheet.columns[0]
+      // Validate search_in columns
+      settings.search_in = settings.search_in.filter(
+        c => sheet.columns.includes(c)
+      )
+      if (settings.search_in.length === 0) {
+        settings.search_in = [sheet.columns[0]]
       }
       await setSettings(project_id, settings)
       await touchProject(project_id)
@@ -125,34 +134,112 @@ export default function SettingsScreen() {
           <Text className="mb-2 text-xs text-charcoal-light">
             Column whose value is used as the filename when saving captured photos.
           </Text>
-          <ColumnPicker
+          <SingleColumnPicker
             columns={sheet.columns}
             value={settings.photo_id_column}
             onChange={c => setSettingsState({ ...settings, photo_id_column: c })}
           />
         </Section>
 
-        {/* B. Sort by */}
-        <Section title="B. Sort by">
+        {/* B. Sort by — multi-column with pills */}
+        <Section title="B. Sort by (multi-column)">
           <Text className="mb-2 text-xs text-charcoal-light">
-            Column used to sort rows before navigating Prev/Next on the capture screen.
+            Tap a column to add it to the sort order. Pills show current sort columns — tap direction to toggle asc/desc, tap ✕ to remove.
           </Text>
-          <ColumnPicker
-            columns={sheet.columns}
-            value={settings.sort_by}
-            onChange={c => setSettingsState({ ...settings, sort_by: c })}
-          />
+
+          {/* Pill list of active sort columns */}
+          {settings.sort_by.length > 0 && (
+            <View className="mb-3 flex-row flex-wrap gap-2">
+              {settings.sort_by.map((sc, idx) => (
+                <View
+                  key={`${sc.column}-${idx}`}
+                  className="flex-row items-center border border-charcoal/30 bg-white px-2 py-1"
+                >
+                  <Text className="text-xs text-charcoal">{sc.column}</Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      const next = [...settings.sort_by]
+                      next[idx] = {
+                        ...next[idx],
+                        direction: next[idx].direction === 'asc' ? 'desc' : 'asc',
+                      }
+                      setSettingsState({ ...settings, sort_by: next })
+                    }}
+                    className="mx-1 px-1"
+                  >
+                    {sc.direction === 'asc' ? (
+                      <ArrowUp size={12} color="#00AEEF" />
+                    ) : (
+                      <ArrowDown size={12} color="#FF6B35" />
+                    )}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => {
+                      const next = settings.sort_by.filter((_, i) => i !== idx)
+                      setSettingsState({ ...settings, sort_by: next })
+                    }}
+                    className="ml-0.5"
+                  >
+                    <X size={12} color="#D32F2F" />
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Column list to add to sort */}
+          <View className="border border-charcoal/20 bg-white">
+            {sheet.columns.map(c => {
+              const isAdded = settings.sort_by.some(sc => sc.column === c)
+              return (
+                <TouchableOpacity
+                  key={c}
+                  onPress={() => {
+                    if (isAdded) {
+                      // Remove from sort
+                      setSettingsState({
+                        ...settings,
+                        sort_by: settings.sort_by.filter(sc => sc.column !== c),
+                      })
+                    } else {
+                      // Add to sort
+                      setSettingsState({
+                        ...settings,
+                        sort_by: [...settings.sort_by, { column: c, direction: 'asc' as const }],
+                      })
+                    }
+                  }}
+                  className={`flex-row items-center justify-between border-b border-charcoal/10 px-3 py-3 ${isAdded ? 'bg-cyan/10' : ''
+                    }`}
+                >
+                  <Text className="text-sm text-charcoal">{c}</Text>
+                  {isAdded ? (
+                    <View className="flex-row items-center gap-1">
+                      <Text className="font-mono text-[10px] text-cyan">
+                        {settings.sort_by.find(sc => sc.column === c)?.direction === 'asc' ? 'ASC' : 'DESC'}
+                      </Text>
+                      <Check size={14} color="#00AEEF" />
+                    </View>
+                  ) : (
+                    <Text className="font-mono text-[10px] uppercase tracking-widest text-charcoal-light">
+                      Tap to add
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              )
+            })}
+          </View>
         </Section>
 
-        {/* C. Search in */}
-        <Section title="C. Search in">
+        {/* C. Search in — multi-select */}
+        <Section title="C. Search in (multi-select)">
           <Text className="mb-2 text-xs text-charcoal-light">
-            Column whose value powers the fuzzy-search bar at the top of the capture screen.
+            Select columns to search across. Multiple columns allow broader fuzzy matching.
           </Text>
-          <ColumnPicker
+          <MultiColumnPicker
             columns={sheet.columns}
-            value={settings.search_in}
-            onChange={c => setSettingsState({ ...settings, search_in: c })}
+            values={settings.search_in}
+            onChange={cols => setSettingsState({ ...settings, search_in: cols })}
           />
         </Section>
 
@@ -225,7 +312,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function ColumnPicker({
+function SingleColumnPicker({
   columns,
   value,
   onChange
@@ -235,20 +322,57 @@ function ColumnPicker({
   onChange: (c: string) => void
 }) {
   return (
-    <View>
-      <View className="border border-charcoal/20 bg-white">
-        {columns.map(c => (
+    <View className="border border-charcoal/20 bg-white">
+      {columns.map(c => (
+        <TouchableOpacity
+          key={c}
+          onPress={() => onChange(c)}
+          className={`flex-row items-center justify-between border-b border-charcoal/10 px-3 py-3 ${value === c ? 'bg-cyan/10' : ''
+            }`}
+        >
+          <Text className="text-sm text-charcoal">{c}</Text>
+          {value === c ? <Check size={14} color="#00AEEF" /> : null}
+        </TouchableOpacity>
+      ))}
+    </View>
+  )
+}
+
+function MultiColumnPicker({
+  columns,
+  values,
+  onChange
+}: {
+  columns: string[]
+  values: string[]
+  onChange: (cols: string[]) => void
+}) {
+  const toggle = (col: string) => {
+    if (values.includes(col)) {
+      // Don't allow deselecting if it's the last one
+      if (values.length <= 1) return
+      onChange(values.filter(c => c !== col))
+    } else {
+      onChange([...values, col])
+    }
+  }
+
+  return (
+    <View className="border border-charcoal/20 bg-white">
+      {columns.map(c => {
+        const isSelected = values.includes(c)
+        return (
           <TouchableOpacity
             key={c}
-            onPress={() => onChange(c)}
-            className={`flex-row items-center justify-between border-b border-charcoal/10 px-3 py-3 ${value === c ? 'bg-cyan/10' : ''
+            onPress={() => toggle(c)}
+            className={`flex-row items-center justify-between border-b border-charcoal/10 px-3 py-3 ${isSelected ? 'bg-cyan/10' : ''
               }`}
           >
             <Text className="text-sm text-charcoal">{c}</Text>
-            {value === c ? <Check size={14} color="#00AEEF" /> : null}
+            {isSelected ? <Check size={14} color="#00AEEF" /> : null}
           </TouchableOpacity>
-        ))}
-      </View>
+        )
+      })}
     </View>
   )
 }

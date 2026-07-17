@@ -1,19 +1,13 @@
 import * as SQLite from 'expo-sqlite'
 import { nanoid } from '../lib/nanoid'
-
-/**
- * SQLite is the source of truth for projects on-device.
- * Supabase is touched only for auth and for the "Upload to Harry Graphics"
- * flow. The `data_sheet` blob is stored separately in AsyncStorage
- * (see lib/storage.ts) because it can be large and is JSON-shaped.
- */
+import { getCurrentUserId } from './storage'
 
 export interface Project {
   project_id: string
   name: string
   created_on: number // epoch ms
   updated_on: number // epoch ms
-  // data_sheet stored in AsyncStorage (lib/storage.ts), keyed by project_id.
+  user_id: string | null
 }
 
 const DB_NAME = 'harry_graphics.db'
@@ -28,19 +22,29 @@ async function getDb(): Promise<SQLite.SQLiteDatabase> {
         project_id   TEXT PRIMARY KEY NOT NULL,
         name         TEXT NOT NULL,
         created_on   INTEGER NOT NULL,
-        updated_on   INTEGER NOT NULL
+        updated_on   INTEGER NOT NULL,
+        user_id      TEXT
       );
     `)
+    // Migration: add user_id column if it doesn't exist
+    try {
+      await db.execAsync(`ALTER TABLE projects ADD COLUMN user_id TEXT;`)
+    } catch {
+      // Column already exists — ignore
+    }
   }
   return db
 }
 
 export async function listProjects(): Promise<Project[]> {
   const d = await getDb()
+  const userId = getCurrentUserId()
   const rows = await d.getAllAsync<Project>(
-    `SELECT project_id, name, created_on, updated_on
+    `SELECT project_id, name, created_on, updated_on, user_id
        FROM projects
-       ORDER BY updated_on DESC`
+       WHERE user_id = ? OR user_id IS NULL
+       ORDER BY updated_on DESC`,
+    [userId ?? '']
   )
   return rows
 }
@@ -49,12 +53,13 @@ export async function createProject(name: string): Promise<Project> {
   const d = await getDb()
   const now = Date.now()
   const project_id = nanoid()
+  const userId = getCurrentUserId()
   await d.runAsync(
-    `INSERT INTO projects (project_id, name, created_on, updated_on)
-       VALUES (?, ?, ?, ?)`,
-    [project_id, name.trim(), now, now]
+    `INSERT INTO projects (project_id, name, created_on, updated_on, user_id)
+       VALUES (?, ?, ?, ?, ?)`,
+    [project_id, name.trim(), now, now, userId]
   )
-  return { project_id, name: name.trim(), created_on: now, updated_on: now }
+  return { project_id, name: name.trim(), created_on: now, updated_on: now, user_id: userId }
 }
 
 export async function touchProject(project_id: string): Promise<void> {

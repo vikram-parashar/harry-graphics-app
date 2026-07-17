@@ -68,7 +68,7 @@ export default function UploadToHarryGraphicsModal({
   const [stage, setStage] = useState<Stage>('idle')
   const [progress, setProgress] = useState(0)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
-  const [result, setResult] = useState<{ sheetUrl: string; zipUrl: string; recordId: string } | null>(null)
+  const [result, setResult] = useState<{ recordId: string } | null>(null)
   const [sizeInfo, setSizeInfo] = useState<{ sheetBytes: number; imageBytes: number; totalBytes: number } | null>(null)
   const [message, setMessage] = useState('')
 
@@ -80,15 +80,15 @@ export default function UploadToHarryGraphicsModal({
     setResult(null)
     setSizeInfo(null)
     setMessage('')
-    ;(async () => {
-      try {
-        const sizes = await estimateUploadSize(projectId)
-        setSizeInfo(sizes)
-      } catch (e) {
-        setErrorMsg(e instanceof Error ? e.message : 'Failed to estimate size.')
-        setStage('error')
-      }
-    })()
+      ; (async () => {
+        try {
+          const sizes = await estimateUploadSize(projectId)
+          setSizeInfo(sizes)
+        } catch (e) {
+          setErrorMsg(e instanceof Error ? e.message : 'Failed to estimate size.')
+          setStage('error')
+        }
+      })()
   }, [isOpen, projectId])
 
   const handleConfirm = async () => {
@@ -141,9 +141,8 @@ export default function UploadToHarryGraphicsModal({
 
           <View className="gap-4 p-5">
             <Text className="text-xs leading-relaxed text-charcoal-light">
-              Zips all captured images, re-exports your data sheet as .xlsx,
-              uploads both to Harry Graphics storage, and inserts a record
-              (with download links) into the dashboard.
+              Zips all captured images, exports your data sheet,
+              uploads to Harry Graphics storage.
             </Text>
 
             {/* Confirming stage — show size estimate + message field */}
@@ -171,7 +170,7 @@ export default function UploadToHarryGraphicsModal({
                   <TextInput
                     value={message}
                     onChangeText={setMessage}
-                    placeholder="Notes for the studio operator"
+                    placeholder="Notes regarding project"
                     placeholderTextColor="#6B6B6B"
                     multiline
                     className="min-h-[60px] w-full border border-charcoal/20 bg-white p-3 text-charcoal"
@@ -181,7 +180,7 @@ export default function UploadToHarryGraphicsModal({
                 <View className="flex-row items-center gap-2 border-l-4 border-yellow bg-yellow/10 p-3">
                   <AlertTriangle size={14} color="#FBC02D" />
                   <Text className="flex-1 text-xs text-charcoal">
-                    Project: <Text className="font-semibold">{projectName}</Text>. Are you sure you want to upload?
+                    Project: <Text className="font-semibold">{projectName}</Text>. Are you sure you want to upload? Please do not close app or modal while uploading.
                   </Text>
                 </View>
               </View>
@@ -214,21 +213,7 @@ export default function UploadToHarryGraphicsModal({
                 <View className="flex-row items-start gap-2 border border-cyan/30 bg-cyan/5 p-3">
                   <CheckCircle2 size={14} color="#00AEEF" />
                   <Text className="flex-1 text-xs text-charcoal">
-                    Upload complete! The project has been saved to your dashboard.
-                  </Text>
-                </View>
-                <View className="gap-1 border border-charcoal/10 bg-cream-dark p-3">
-                  <Text className="flex-row items-center gap-1 font-mono text-charcoal-light">
-                    <Link2 size={10} color="#6B6B6B" /> Excel sheet URL:
-                  </Text>
-                  <Text className="font-mono text-[10px] text-charcoal" numberOfLines={2}>
-                    {result.sheetUrl}
-                  </Text>
-                  <Text className="mt-2 flex-row items-center gap-1 font-mono text-charcoal-light">
-                    <Link2 size={10} color="#6B6B6B" /> Image zip URL:
-                  </Text>
-                  <Text className="font-mono text-[10px] text-charcoal" numberOfLines={2}>
-                    {result.zipUrl}
+                    Upload complete!
                   </Text>
                 </View>
               </View>

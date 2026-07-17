@@ -1,47 +1,63 @@
 import AsyncStorage from '@react-native-async-storage/async-storage'
-
-/**
- * AsyncStorage is our localStorage equivalent.
- *
- * Per-project keys:
- *   - `data_sheet:{project_id}`            — the Excel sheet (JSON)
- *   - `settings:{project_id}`              — capture screen settings
- *   - `image:{project_id}:{photo_id}`      — JPEG data URL of one captured photo
- *
- * We use namespaced keys so per-project deletion is a simple scan.
- *
- * NOTE on the user's "no cap" choice: AsyncStorage has a 6 MB ceiling
- * on Android by default. We do not enforce a cap, but if QuotaExceeded
- * is thrown we rethrow it up to the UI for surfacing.
- */
+import * as FileSystem from 'expo-file-system/legacy'
 
 export interface DataSheet {
-  /** Original sheet name (for display). */
   sheetName: string
-  /** Column headers in original order. */
   columns: string[]
-  /** Rows as objects keyed by column name. */
   rows: Record<string, string | number | boolean | null>[]
 }
 
-export interface ProjectSettings {
-  /** Column whose value is used as the filename when saving photos. */
-  photo_id_column: string
-  /** Column used to sort rows before navigating prev/next. */
-  sort_by: string
-  /** Column whose value is shown in the search bar + used for fuzzy match. */
-  search_in: string
-  /** Photo print size in mm. */
-  photo_width_mm: number
-  photo_height_mm: number
-  /** Index into the *sorted* rows array; -1 means "no reference yet". */
-  referenced_row_number: number
+export interface SortColumn {
+  column: string
+  direction: 'asc' | 'desc'
 }
 
-export const DEFAULT_SETTINGS: Omit<ProjectSettings, 'photo_id_column' | 'sort_by' | 'search_in'> = {
+export interface ColumnFilter {
+  column: string
+  excludedValues: string[]
+  hasImageOnly?: boolean
+}
+
+export interface ProjectSettings {
+  photo_id_column: string
+  sort_by: SortColumn[]
+  search_in: string[]
+  photo_width_mm: number
+  photo_height_mm: number
+  referenced_row_number: number
+  filters: ColumnFilter[]
+}
+
+export const DEFAULT_SETTINGS: Omit<ProjectSettings, 'photo_id_column' | 'sort_by' | 'search_in' | 'filters'> = {
   photo_width_mm: 35,
   photo_height_mm: 45,
   referenced_row_number: 0,
+}
+
+// ─── User ID scoping ─────────────────────────────────────────────────
+
+let _currentUserId: string | null = null
+
+export function setCurrentUserId(userId: string | null) {
+  _currentUserId = userId
+}
+
+export function getCurrentUserId(): string | null {
+  return _currentUserId
+}
+
+// ─── Images directory (filesystem, not AsyncStorage) ──────────────────
+
+function getImagesDir(projectId: string): string {
+  const uid = _currentUserId ?? 'anon'
+  return `${FileSystem.documentDirectory}projects/${uid}/${projectId}/images/`
+}
+
+async function ensureDir(dir: string): Promise<void> {
+  const info = await FileSystem.getInfoAsync(dir)
+  if (!info.exists) {
+    await FileSystem.makeDirectoryAsync(dir, { intermediates: true })
+  }
 }
 
 // ─── Data sheet ──────────────────────────────────────────────────────
@@ -66,7 +82,20 @@ export async function getSettings(projectId: string): Promise<ProjectSettings | 
   const raw = await AsyncStorage.getItem(keySettings(projectId))
   if (!raw) return null
   try {
-    return JSON.parse(raw) as ProjectSettings
+    const parsed = JSON.parse(raw)
+    // Migrate old format: sort_by was a single string
+    if (typeof parsed.sort_by === 'string') {
+      parsed.sort_by = [{ column: parsed.sort_by, direction: 'asc' as const }]
+    }
+    // Migrate old format: search_in was a single string
+    if (typeof parsed.search_in === 'string') {
+      parsed.search_in = [parsed.search_in]
+    }
+    // Migrate: filters field missing
+    if (!Array.isArray(parsed.filters)) {
+      parsed.filters = []
+    }
+    return parsed as ProjectSettings
   } catch {
     return null
   }
@@ -76,82 +105,120 @@ export async function setSettings(projectId: string, settings: ProjectSettings):
   await AsyncStorage.setItem(keySettings(projectId), JSON.stringify(settings))
 }
 
-// ─── Images ──────────────────────────────────────────────────────────
+// ─── Images (filesystem-based) ───────────────────────────────────────
 
-/** Returns a list of photo_id values that have a saved image. */
 export async function listImageNames(projectId: string): Promise<string[]> {
-  const allKeys = await AsyncStorage.getAllKeys()
-  const prefix = keyImagePrefix(projectId)
-  const matches = allKeys.filter(k => typeof k === 'string' && k.startsWith(prefix))
-  return matches.map(k => (k as string).slice(prefix.length))
-}
-
-export async function getImage(
-  projectId: string,
-  photoId: string
-): Promise<string | null> {
-  return AsyncStorage.getItem(keyImage(projectId, photoId))
-}
-
-export async function setImage(
-  projectId: string,
-  photoId: string,
-  jpegDataUrl: string
-): Promise<void> {
-  await AsyncStorage.setItem(keyImage(projectId, photoId), jpegDataUrl)
-}
-
-export async function deleteImage(projectId: string, photoId: string): Promise<void> {
-  await AsyncStorage.removeItem(keyImage(projectId, photoId))
+  const dir = getImagesDir(projectId)
+  const info = await FileSystem.getInfoAsync(dir)
+  if (!info.exists) return []
+  try {
+    const files = await FileSystem.readDirectoryAsync(dir)
+    return files
+      .filter(f => f.endsWith('.jpg'))
+      .map(f => f.replace(/\.jpg$/, ''))
+  } catch {
+    return []
+  }
 }
 
 /**
- * Compute approximate byte size of all images for a project.
- * Used by the upload modal's size-estimate prompt.
+ * Returns the file URI for a stored image, or null if not found.
+ */
+export async function getImageUri(
+  projectId: string,
+  photoId: string
+): Promise<string | null> {
+  const path = `${getImagesDir(projectId)}${photoId}.jpg`
+  const info = await FileSystem.getInfoAsync(path)
+  return info.exists ? path : null
+}
+
+/**
+ * Store an image by copying/moving from a source URI (e.g. camera cache).
+ * Source URI can be a file:// URI from the camera or another location.
+ */
+export async function setImage(
+  projectId: string,
+  photoId: string,
+  sourceUri: string
+): Promise<void> {
+  const dir = getImagesDir(projectId)
+  await ensureDir(dir)
+  const destPath = `${dir}${photoId}.jpg`
+  // If destination already exists, overwrite it
+  const existing = await FileSystem.getInfoAsync(destPath)
+  if (existing.exists) {
+    await FileSystem.deleteAsync(destPath, { idempotent: true })
+  }
+  await FileSystem.copyAsync({ from: sourceUri, to: destPath })
+}
+
+export async function deleteImage(projectId: string, photoId: string): Promise<void> {
+  const path = `${getImagesDir(projectId)}${photoId}.jpg`
+  const info = await FileSystem.getInfoAsync(path)
+  if (info.exists) {
+    await FileSystem.deleteAsync(path, { idempotent: true })
+  }
+}
+
+/**
+ * Returns total bytes used by images for a project (from file sizes).
  */
 export async function getProjectImageBytes(projectId: string): Promise<number> {
   const names = await listImageNames(projectId)
+  const dir = getImagesDir(projectId)
   let total = 0
   for (const n of names) {
-    const v = await getImage(projectId, n)
-    if (v) total += v.length
+    const path = `${dir}${n}.jpg`
+    const info = await FileSystem.getInfoAsync(path)
+    if (info.exists && (info as any).size) {
+      total += (info as any).size as number
+    }
   }
   return total
 }
 
 /**
- * Returns { name, dataUrl } for every image saved for this project.
- * Used when zipping images for upload.
+ * Returns all image URIs for a project (for upload & gallery).
  */
-export async function getAllProjectImages(
+export async function getAllProjectImageUris(
   projectId: string
-): Promise<{ name: string; dataUrl: string }[]> {
+): Promise<{ name: string; uri: string }[]> {
   const names = await listImageNames(projectId)
-  const out: { name: string; dataUrl: string }[] = []
+  const dir = getImagesDir(projectId)
+  const out: { name: string; uri: string }[] = []
   for (const n of names) {
-    const v = await getImage(projectId, n)
-    if (v) out.push({ name: n, dataUrl: v })
+    const path = `${dir}${n}.jpg`
+    const info = await FileSystem.getInfoAsync(path)
+    if (info.exists) {
+      out.push({ name: n, uri: path })
+    }
   }
   return out
 }
 
-/** Delete all storage keys belonging to a project. Call when deleting a project. */
 export async function wipeProjectStorage(projectId: string): Promise<void> {
+  // Delete settings and data_sheet from AsyncStorage
   const allKeys = await AsyncStorage.getAllKeys()
   const toRemove = allKeys.filter(
     k =>
       typeof k === 'string' &&
       (k === keySheet(projectId) ||
-        k === keySettings(projectId) ||
-        k.startsWith(keyImagePrefix(projectId)))
+        k === keySettings(projectId))
   )
   if (toRemove.length > 0) await AsyncStorage.multiRemove(toRemove as string[])
+
+  // Delete images directory from filesystem
+  const dir = getImagesDir(projectId)
+  const info = await FileSystem.getInfoAsync(dir)
+  if (info.exists) {
+    await FileSystem.deleteAsync(dir, { idempotent: true })
+  }
 }
 
-// ─── Key builders ────────────────────────────────────────────────────
+// ─── Key builders (scoped by user_id, for AsyncStorage) ──────────────
 
-const keySheet = (projectId: string) => `data_sheet:${projectId}`
-const keySettings = (projectId: string) => `settings:${projectId}`
-const keyImagePrefix = (projectId: string) => `image:${projectId}:`
-const keyImage = (projectId: string, photoId: string) =>
-  `${keyImagePrefix(projectId)}${photoId}`
+const keySheet = (projectId: string) =>
+  `user:${_currentUserId ?? 'anon'}:data_sheet:${projectId}`
+const keySettings = (projectId: string) =>
+  `user:${_currentUserId ?? 'anon'}:settings:${projectId}`
